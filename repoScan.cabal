@@ -20,13 +20,15 @@ executable repoScan
   -- other-modules:
   -- other-extensions:
   build-depends:       base >=4.11 && <4.12
-                     , turtle
+                     , turtle, foldl
                      , text
+                     , cassava
                      , aeson, aeson-pretty
                      , vector
                      , either
                      , bytestring, word8
                      , containers
                      , wreq, lens
+                     , vector
   hs-source-dirs:      src
   default-language:    Haskell2010
