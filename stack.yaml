@@ -1,0 +1,8 @@
+resolver: lts-12.10
+
+nix:
+  # enable: true
+  packages: [zlib] 
+
+packages:
+- .
