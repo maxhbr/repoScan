@@ -171,12 +171,34 @@ data Commit
 instance ToJSON Commit where
     toEncoding = genericToEncoding defaultOptions
 
+data CommitStats
+  = CommitStats
+  { cm_name :: [Text]
+  , cm_commits :: Int
+  , cm_authors :: Int
+  } deriving (Show, Generic)
+instance ToJSON CommitStats where
+    toEncoding = genericToEncoding defaultOptions
+
+data FileReport
+  = FileReport
+  { freport_files :: [Text]
+  , freport_hasContributing :: Bool
+  , freport_hasLicense :: Bool
+  , freport_hasNotice :: Bool
+  , freport_hasReadme :: Bool
+  } deriving (Show, Generic)
+instance ToJSON FileReport where
+    toEncoding = genericToEncoding defaultOptions
+
 data Report
   = Report
   { report_repo :: Repo
   , report_commits :: [Commit]
+  , report_commitStats :: Map.Map Text CommitStats
   , report_issues :: [Issue]
   , report_pulls :: [Pull]
+  , report_file_report :: FileReport
   } deriving (Show, Generic)
 instance ToJSON Report where
     toEncoding = genericToEncoding defaultOptions
@@ -212,13 +234,16 @@ cloneIfNecessary Repo{full_name = f, clone_url = c} = do
   let target = fromString $ Tx.unpack f
   exists <- testdir target
   unless exists $ do
+    putStrLn ("### clone from: " ++ (show c))
     mktree target
     e <- T.proc "git" ["clone", c, f] (T.select [])
     print e
 
 handleCommitsOfRepo :: Repo -> IO (Either String [Commit])
 handleCommitsOfRepo repo = let
-    input = TB.inproc "git" ["log", "--date=iso", "--pretty=format:\"%h\",\"%an\",\"%ae\",\"%ad\",\"%cn\",\"%ce\",\"%cd\",\"%s\""] (T.select []) --,\"%GS\",\"%G?\",\"%GK\"
+    -- TODO: ugly:
+    input = TB.inproc "git" ["log", "--date=iso", "--pretty=format:\"%h\",\"%an\",\"%ae\",\"%ad\",\"%cn\",\"%ce\",\"%cd\",\"%s\""] (T.select [])
+    inputWOMsg = TB.inproc "git" ["log", "--date=iso", "--pretty=format:\"%h\",\"%an\",\"%ae\",\"%ad\",\"%cn\",\"%ce\",\"%cd\",\"\""] (T.select [])
     handleGitLogLine :: GitLogLine -> Commit
     handleGitLogLine gll = Commit (gll_message gll)
                                   (gll_hash gll)
@@ -226,11 +251,37 @@ handleCommitsOfRepo repo = let
                                   (Person (gll_commiter gll) (gll_commiter_email gll))
                                   (full_name repo)
   in do
-    T.cd $ T.fromText (full_name repo)
     csvData <- fmap BSL.fromStrict $ fold (input) (F.foldMap id id)
-    return $ case (CSV.decode CSV.NoHeader csvData) :: Either String (V.Vector GitLogLine) of
-      Left err -> Left err
-      Right results -> Right (V.toList (V.map handleGitLogLine results))
+    case (CSV.decode CSV.NoHeader csvData) :: Either String (V.Vector GitLogLine) of
+      Left err1 -> do
+        print err1
+        csvDataWOMsg <- fmap BSL.fromStrict $ fold (inputWOMsg) (F.foldMap id id)
+        return $ case (CSV.decode CSV.NoHeader csvDataWOMsg) :: Either String (V.Vector GitLogLine) of
+          Left err2 -> Left err2
+          Right results -> Right (V.toList (V.map handleGitLogLine results))
+      Right results -> return $ Right (V.toList (V.map handleGitLogLine results))
+
+handleFilesOfRepo :: Repo -> IO FileReport
+handleFilesOfRepo repo = do
+  lines <- fold (T.inproc "git" ["ls-files"] (T.select [])) F.list
+  let files = (L.map lineToText lines)
+  let funToTestFiles = \s -> L.any (s `Tx.isPrefixOf`) files
+  let hasContributing = funToTestFiles "CONTRIBUTING"
+      hasLicense = funToTestFiles "LICENSE"
+      hasNotice = funToTestFiles "NOTICE"
+      hasReadme = funToTestFiles "README"
+  return (FileReport files hasContributing hasLicense hasNotice hasReadme)
+
+computeUserStats :: [Commit] -> Map.Map Text CommitStats
+computeUserStats commits = let
+    stupidMapStats :: Commit -> [(Text, CommitStats)]
+    stupidMapStats commit = let
+        author = commit_author commit
+        commiter = commit_commiter commit
+      in [ (person_email commiter, CommitStats [person_name commiter] 1 0)
+         , (person_email author, CommitStats [person_name author] 0 1) ]
+    joinStats s1 s2 = CommitStats (L.nub $ cm_name s1 ++ cm_name s2) (cm_commits s1 + cm_commits s2) (cm_authors s1 + cm_authors s2)
+  in Map.fromListWith joinStats $ L.concatMap stupidMapStats commits
 
 handleRepo :: W.Options -> Repo -> IO Report
 handleRepo opts repo = let
@@ -240,33 +291,60 @@ handleRepo opts repo = let
       return []
     handleEitherResult (Right vals) = return vals
   in do
-    putStrLn ("handle repo: " ++ (show (full_name repo)))
+    putStrLn ("### handle repo: " ++ (show (full_name repo)))
     cloneIfNecessary repo
+    T.cd $ T.fromText (full_name repo)
 
     commits <- handleEitherResult =<< handleCommitsOfRepo repo
+
+    let userStats = computeUserStats commits
+
     issues <- handleEitherResult =<< getIssuesHTTP opts repo
     pulls <- handleEitherResult =<< getPullsHTTP opts repo
 
-    return (Report repo commits issues pulls)
+    fileReport <- handleFilesOfRepo repo
+
+    return (Report repo commits userStats issues pulls fileReport)
 
 handleReport :: Report -> IO ()
-handleReport = BSL.putStrLn . A.encodePretty
+handleReport report@(Report{report_repo = repo@Repo{full_name = fn, name = n}}) = do
+  putStrLn ("### write reports of: " ++ (show (full_name repo)))
+
+  let pReport = A.encodePretty report
+      reportPath = T.fromText $ fn `Tx.append` (Tx.pack ".json")
+  TB.output reportPath (return (BSL.toStrict pReport))
+
+  let emailsCsvPath = T.fromText $ fn `Tx.append` (Tx.pack "_emails.csv")
+      emails = ( Tx.encodeUtf8
+               . Tx.unlines
+               . ("email,#authors,#commits,names...":)
+               . L.map (Tx.intercalate (singleton ','))
+               . L.map (\(k,v) -> (k
+                                   : ((Tx.pack . show $ cm_authors v)
+                                      : ((Tx.pack . show $ cm_commits v)
+                                         : (cm_name v)))))
+               . Map.assocs
+               . report_commitStats) report
+  TB.output emailsCsvPath (return emails)
 
 main :: IO ()
 main = let
     optionsParser :: T.Parser (BS.ByteString, BS.ByteString, String, FilePath)
     optionsParser = (,,,) <$> (fmap Tx.encodeUtf8 $ argText "user" "User")
                           <*> (fmap Tx.encodeUtf8 $ argText "token" "Token")
-                          <*> (fmap Tx.unpack $ argText "source" "Source")
+                          <*> (fmap Tx.unpack $ argText "org" "Org")
                           <*> argPath "target" "Target"
   in do
     (user, token, org, target) <- options "repoScan" optionsParser
     let opts = W.defaults & W.auth ?~ W.basicAuth user token
+
     T.mktree target
     T.cd target
+
+    root <- T.pwd
+
     parsed <- getReposHTTP opts org
     case parsed of
-      Left err  -> print err
+      Left err    -> print err
       Right repos -> do
-        reports <- mapM (handleRepo opts) repos
-        mapM_ handleReport reports
+        mapM_ (\repo -> T.cd root >> handleRepo opts repo >>= (\report -> T.cd root >> handleReport report)) repos

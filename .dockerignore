@@ -1,0 +1,6 @@
+.dockerignore
+.git
+.stack-work
+workdir
+Dockerfile
+runInDocker.sh
