@@ -6,11 +6,10 @@
 module Main where
 import           Prelude hiding (FilePath)
 import qualified Prelude as P
-import           Turtle as T hiding (f,e,err,root)
-import           Turtle.Format as T hiding (f,e,err,root)
+import           Turtle as T hiding (f,e,err)
+import qualified Turtle.Format (fp)
 import qualified Turtle.Bytes as TB
 import qualified Control.Foldl as F
-import           Control.Applicative
 import           GHC.Generics
 import           Control.Lens
 import           Data.Aeson as A
@@ -24,8 +23,6 @@ import qualified Data.ByteString.Lazy.Char8 as BSL
 import qualified Data.Map as Map
 import qualified Data.Vector as V
 import qualified Network.Wreq as W
-
-import           Debug.Trace
 
 data License
   = License
@@ -143,7 +140,7 @@ data GitLogLine
   , gll_message :: Text
   } deriving (Show, Generic)
 instance CSV.FromRecord GitLogLine where
-  parseRecord v | V.length v >= 7 = GitLogLine <$> v `CSV.index` 0
+  parseRecord v | V.length v == 8 = GitLogLine <$> v `CSV.index` 0
                                                <*> v `CSV.index` 1
                                                <*> v `CSV.index` 2
                                                <*> v `CSV.index` 3
@@ -151,6 +148,14 @@ instance CSV.FromRecord GitLogLine where
                                                <*> v `CSV.index` 5
                                                <*> v `CSV.index` 6
                                                <*> v `CSV.index` 7
+                | V.length v == 7 = GitLogLine <$> v `CSV.index` 0
+                                               <*> v `CSV.index` 1
+                                               <*> v `CSV.index` 2
+                                               <*> v `CSV.index` 3
+                                               <*> v `CSV.index` 4
+                                               <*> v `CSV.index` 5
+                                               <*> v `CSV.index` 6
+                                               <*> return ""
                 | otherwise       = mzero
 
 data Person
@@ -189,23 +194,7 @@ data CommitReport
 instance ToJSON CommitReport where
   toJSON (CommitReport cs css) = A.object
     [ "cmr_commitStats" A..= css
-    , "numberOfCommits" A..= (L.length cs) ]
--- newtype Commits
---   = Commits [Commit]
---   deriving (Show, Generic)
--- instance ToJSON Commits where
---   toJSON (Commits cs) = let
---       computeUserStats :: [Commit] -> Map.Map Text CommitStats
---       computeUserStats commits = let
---           stupidMapStats :: Commit -> [(Text, CommitStats)]
---           stupidMapStats commit = let
---               author = commit_author commit
---               commiter = commit_commiter commit
---             in [ (person_email commiter, CommitStats [person_name commiter] 1 0)
---                , (person_email author, CommitStats [person_name author] 0 1) ]
---           joinStats s1 s2 = CommitStats (L.nub $ cm_name s1 ++ cm_name s2) (cm_commits s1 + cm_commits s2) (cm_authors s1 + cm_authors s2)
---         in Map.fromListWith joinStats $ L.concatMap stupidMapStats commits
---     in A.object ["userStats" A..= (computeUserStats cs), "numberOfCommits" A..= (L.length cs)]
+    , "numberOfCommits" A..= L.length cs ]
 
 data FileReport
   = FileReport
@@ -255,21 +244,27 @@ getIssuesHTTP = getHTTP issuesUrl
 getPullsHTTP :: W.Options -> Repo -> IO (Either String [Pull])
 getPullsHTTP = getHTTP pullsUrl
 
-cloneIfNecessary :: Repo -> IO ()
-cloneIfNecessary Repo{full_name = f, clone_url = c} = do
-  let target = fromString $ Tx.unpack f
+cloneOrUpdate :: Repo -> IO ()
+cloneOrUpdate Repo{full_name = f, clone_url = c} = do
+  let target = fromText f
   exists <- testdir target
-  unless exists $ do
-    putStrLn ("### clone from: " ++ (show c))
-    mktree target
-    e <- T.proc "git" ["clone", c, f] (T.select [])
-    print e
+  if exists
+    then do
+      putStrLn ("## update from: " ++ show c)
+      e <- T.proc "git" ["--git-dir", f `Tx.append` "/.git", "pull"] (T.select [])
+      print e
+    else do
+      putStrLn ("## clone from: " ++ show c)
+      mktree target
+      e <- T.proc "git" ["clone", c, f] (T.select [])
+      print e
 
 handleRawCommitsOfRepo :: Repo -> IO (Either String [Commit])
 handleRawCommitsOfRepo repo = let
-    -- TODO: ugly:
-    input = TB.inproc "git" ["log", "--date=iso", "--pretty=format:\"%h\",\"%an\",\"%ae\",\"%ad\",\"%cn\",\"%ce\",\"%cd\",\"%s\""] (T.select [])
-    inputWOMsg = TB.inproc "git" ["log", "--date=iso", "--pretty=format:\"%h\",\"%an\",\"%ae\",\"%ad\",\"%cn\",\"%ce\",\"%cd\",\"\""] (T.select [])
+    formatWithMsg = ["%h","%an","%ae","%ad","%cn","%ce","%cd","%s"]
+    gitLogWithFormat formating = TB.inproc "git" ["--git-dir", full_name repo `Tx.append` "/.git", "log", "--date=iso", "--pretty=format:\"" `Tx.append` Tx.intercalate "\",\"" formating `Tx.append` "\""] (T.select [])
+    linesOfLogWithMsg = gitLogWithFormat formatWithMsg
+    linesOfLogWOMsg = gitLogWithFormat (L.init formatWithMsg)
     handleGitLogLine :: GitLogLine -> Commit
     handleGitLogLine gll = Commit (gll_message gll)
                                   (gll_hash gll)
@@ -277,12 +272,12 @@ handleRawCommitsOfRepo repo = let
                                   (Person (gll_commiter gll) (gll_commiter_email gll))
                                   (full_name repo)
   in do
-    csvData <- fmap BSL.fromStrict $ fold (input) (F.foldMap id id)
-    case (CSV.decode CSV.NoHeader csvData) :: Either String (V.Vector GitLogLine) of
+    csvData <- BSL.fromStrict <$> fold linesOfLogWithMsg (F.foldMap id id)
+    case CSV.decode CSV.NoHeader csvData :: Either String (V.Vector GitLogLine) of
       Left err1 -> do
         print err1
-        csvDataWOMsg <- fmap BSL.fromStrict $ fold (inputWOMsg) (F.foldMap id id)
-        return $ case (CSV.decode CSV.NoHeader csvDataWOMsg) :: Either String (V.Vector GitLogLine) of
+        csvDataWOMsg <- BSL.fromStrict <$> fold linesOfLogWOMsg (F.foldMap id id)
+        return $ case CSV.decode CSV.NoHeader csvDataWOMsg :: Either String (V.Vector GitLogLine) of
           Left err2 -> Left err2
           Right results -> Right (V.toList (V.map handleGitLogLine results))
       Right results -> return $ Right (V.toList (V.map handleGitLogLine results))
@@ -307,30 +302,23 @@ handleCommitsOfRepo repo = let
           userStats = computeUserStats commits
         in Right $ CommitReport commits userStats
 
-handleFilesOfRepo :: IO FileReport
-handleFilesOfRepo = let
+handleFilesOfRepo :: Repo -> IO FileReport
+handleFilesOfRepo Repo{full_name = f} = let
     funToTestFiles :: [Text] -> Text -> IO (Maybe Text)
-    funToTestFiles files s = let
+    funToTestFiles files prefix = let
         getDateOfFile :: Text -> IO Text
-        getDateOfFile file = do
-          date <- fold (T.inproc "git" ["log", "-1", "--format=%ai;%H", "--", file] (T.select [])) F.mconcat
-          return (T.lineToText date)
+        getDateOfFile file = T.lineToText <$> fold (T.inproc "git" ["--git-dir", f `Tx.append` "/.git", "log", "-1", "--format=%ai;%H", "--", file] (T.select [])) F.mconcat
         getDateOfFiles :: [Text] -> IO (Maybe Text)
         getDateOfFiles []      = return Nothing
         getDateOfFiles matches = Just . L.maximum <$> mapM getDateOfFile matches
       in do
-        let matchingFiles = L.filter (s `Tx.isPrefixOf`) files
+        let matchingFiles = L.filter (prefix `Tx.isPrefixOf`) files
         getDateOfFiles matchingFiles
   in do
-    putStrLn "# get files"
-    files <- L.map lineToText <$> fold (T.inproc "git" ["ls-files"] (T.select [])) F.list
-    putStrLn "# handle CORTIBUTING"
+    files <- L.map lineToText <$> fold (T.inproc "git" ["--git-dir", f `Tx.append` "/.git", "ls-files"] (T.select [])) F.list
     hasContributing <- funToTestFiles files "CONTRIBUTING"
-    putStrLn "# handle LICENSE"
     hasLicense <- funToTestFiles files "LICENSE"
-    putStrLn "# handle NOTICE"
     hasNotice <- funToTestFiles files "NOTICE"
-    putStrLn "# handle README"
     hasReadme <- funToTestFiles files "README"
     return (FileReport files hasContributing hasLicense hasNotice hasReadme)
 
@@ -348,9 +336,8 @@ handleRepo opts repo = let
     handleEitherResult (Right val) = return $ Just val
   in do
     putStrLn ("### handle repo: " ++ show (full_name repo))
-    cloneIfNecessary repo
-    T.cd $ T.fromText (full_name repo)
-
+    putStrLn ("## handle git")
+    cloneOrUpdate repo
     putStrLn "## handle commits"
     commitReport <- handleEitherResult =<< handleCommitsOfRepo repo
     putStrLn "## handle issues"
@@ -358,32 +345,29 @@ handleRepo opts repo = let
     putStrLn "## handle pulls"
     pulls <- handleEitherListResult =<< getPullsHTTP opts repo
     putStrLn "## handle files"
-    fileReport <- handleFilesOfRepo
-
-    return (Report repo commitReport issues pulls fileReport)
+    Report repo commitReport issues pulls <$> handleFilesOfRepo repo
 
 handleReport :: Report -> IO ()
-handleReport report@(Report{report_repo = repo@Repo{full_name = fn, name = n}}) = do
-  putStrLn ("### write reports of: " ++ (show (full_name repo)))
+handleReport report@(Report{report_repo = repo@Repo{full_name = fn}}) = do
+  putStrLn ("## write reports of: " ++ show (full_name repo))
 
-  -- write raw report
+  putStrLn "# write raw report"
   let pReport = A.encodePretty report
-      reportPath = T.fromText $ fn `Tx.append` (Tx.pack ".json")
+      reportPath = T.fromText $ fn `Tx.append` Tx.pack ".json"
   TB.output reportPath (return (BSL.toStrict pReport))
 
-  -- write emails csv
-
-  case ((fmap cmr_commitStats) . report_commit_report) report of
+  putStrLn "# write emails csv"
+  case (fmap cmr_commitStats . report_commit_report) report of
     Just commitStats -> do
-      let emailsCsvPath = T.fromText $ fn `Tx.append` (Tx.pack "_emails.csv")
+      let emailsCsvPath = T.fromText $ fn `Tx.append` Tx.pack "_emails.csv"
           emails = ( Tx.encodeUtf8
                    . Tx.unlines
                    . ("email,#authors,#commits,names...":)
-                   . L.map (Tx.intercalate (singleton ','))
-                   . L.map (\(k,v) -> (k
-                                        : ((Tx.pack . show $ cm_authors v)
-                                            : ((Tx.pack . show $ cm_commits v)
-                                                : (cm_name v)))))
+                   . L.map ( Tx.intercalate (singleton ',')
+                           . (\(k,v) -> (k
+                                          : ((Tx.pack . show $ cm_authors v)
+                                              : ((Tx.pack . show $ cm_commits v)
+                                                  : cm_name v)))))
                    . Map.assocs
                    ) commitStats
       TB.output emailsCsvPath (return emails)
@@ -392,9 +376,9 @@ handleReport report@(Report{report_repo = repo@Repo{full_name = fn, name = n}}) 
 main :: IO ()
 main = let
     optionsParser :: T.Parser (BS.ByteString, BS.ByteString, String, FilePath)
-    optionsParser = (,,,) <$> (fmap Tx.encodeUtf8 $ argText "user" "User")
-                          <*> (fmap Tx.encodeUtf8 $ argText "token" "Token")
-                          <*> (fmap Tx.unpack $ argText "org" "Org")
+    optionsParser = (,,,) <$> (Tx.encodeUtf8 <$> argText "user" "User")
+                          <*> (Tx.encodeUtf8 <$> argText "token" "Token")
+                          <*> (Tx.unpack <$> argText "org" "Org")
                           <*> argPath "target" "Target"
   in do
     (user, token, org, target) <- options "repoScan" optionsParser
@@ -403,11 +387,11 @@ main = let
     T.mktree target
     T.cd target
 
-    root <- T.pwd
-
     parsed <- getReposHTTP opts org
     case parsed of
       Left err    -> print err
-      Right repos -> mapM_ (\repo -> T.cd root >> handleRepo opts repo >>= (\report -> T.cd root >> handleReport report)) repos
+      Right repos -> do
+        mapM_ (handleRepo opts >=> handleReport) repos
 
-    putStrLn ("workdir was: " ++ (Tx.unpack $ T.format T.fp root))
+        putStrLn "### write .gitignore"
+        T.output (T.fromString org </> ".gitignore") ((return . unsafeTextToLine  . Tx.unlines . L.map name) repos)
