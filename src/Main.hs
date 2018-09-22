@@ -6,9 +6,11 @@
 module Main where
 import           Prelude hiding (FilePath)
 import qualified Prelude as P
-import           Turtle as T hiding (f,e,err)
+import           Turtle as T hiding (f,e,err,root)
+import           Turtle.Format as T hiding (f,e,err,root)
 import qualified Turtle.Bytes as TB
 import qualified Control.Foldl as F
+import           Control.Applicative
 import           GHC.Generics
 import           Control.Lens
 import           Data.Aeson as A
@@ -16,7 +18,6 @@ import qualified Data.Aeson.Encode.Pretty as A
 import qualified Data.Csv as CSV
 import           Data.Text as Tx
 import qualified Data.Text.Encoding as Tx
-import           Data.Maybe
 import           Data.List as L
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as BSL
@@ -41,7 +42,7 @@ instance FromJSON License where
             <*> v .:? "spdx_id"
             <*> v .:? "url"
 instance ToJSON License where
-    toEncoding = genericToEncoding defaultOptions
+  toEncoding = genericToEncoding defaultOptions
 
 data Repo
   = Repo
@@ -82,7 +83,7 @@ instance FromJSON Repo where
             <*> v .: "watchers_count"
             <*> v .: "forks_count"
 instance ToJSON Repo where
-    toEncoding = genericToEncoding defaultOptions
+  toEncoding = genericToEncoding defaultOptions
 
 data Issue
   = Issue
@@ -105,7 +106,7 @@ instance FromJSON Issue where
             <*> v .: "updated_at"
             <*> v .:? "closed_at"
 instance ToJSON Issue where
-    toEncoding = genericToEncoding defaultOptions
+  toEncoding = genericToEncoding defaultOptions
 
 data Pull
   = Pull
@@ -128,7 +129,7 @@ instance FromJSON Pull where
             <*> v .:? "closed_at"
             <*> v .:? "merged_at"
 instance ToJSON Pull where
-    toEncoding = genericToEncoding defaultOptions
+  toEncoding = genericToEncoding defaultOptions
 
 data GitLogLine
   = GitLogLine
@@ -158,7 +159,7 @@ data Person
   , person_email :: Text
   } deriving (Show, Generic)
 instance ToJSON Person where
-    toEncoding = genericToEncoding defaultOptions
+  toEncoding = genericToEncoding defaultOptions
 
 data Commit
   = Commit
@@ -169,7 +170,7 @@ data Commit
   , commit_repository :: Text
   } deriving (Show, Generic)
 instance ToJSON Commit where
-    toEncoding = genericToEncoding defaultOptions
+  toEncoding = genericToEncoding defaultOptions
 
 data CommitStats
   = CommitStats
@@ -178,30 +179,55 @@ data CommitStats
   , cm_authors :: Int
   } deriving (Show, Generic)
 instance ToJSON CommitStats where
-    toEncoding = genericToEncoding defaultOptions
+  toEncoding = genericToEncoding defaultOptions
+
+data CommitReport
+  = CommitReport
+  { cmr_commits :: [Commit]
+  , cmr_commitStats :: Map.Map Text CommitStats
+  } deriving (Show, Generic)
+instance ToJSON CommitReport where
+  toJSON (CommitReport cs css) = A.object
+    [ "cmr_commitStats" A..= css
+    , "numberOfCommits" A..= (L.length cs) ]
+-- newtype Commits
+--   = Commits [Commit]
+--   deriving (Show, Generic)
+-- instance ToJSON Commits where
+--   toJSON (Commits cs) = let
+--       computeUserStats :: [Commit] -> Map.Map Text CommitStats
+--       computeUserStats commits = let
+--           stupidMapStats :: Commit -> [(Text, CommitStats)]
+--           stupidMapStats commit = let
+--               author = commit_author commit
+--               commiter = commit_commiter commit
+--             in [ (person_email commiter, CommitStats [person_name commiter] 1 0)
+--                , (person_email author, CommitStats [person_name author] 0 1) ]
+--           joinStats s1 s2 = CommitStats (L.nub $ cm_name s1 ++ cm_name s2) (cm_commits s1 + cm_commits s2) (cm_authors s1 + cm_authors s2)
+--         in Map.fromListWith joinStats $ L.concatMap stupidMapStats commits
+--     in A.object ["userStats" A..= (computeUserStats cs), "numberOfCommits" A..= (L.length cs)]
 
 data FileReport
   = FileReport
   { freport_files :: [Text]
-  , freport_hasContributing :: Bool
-  , freport_hasLicense :: Bool
-  , freport_hasNotice :: Bool
-  , freport_hasReadme :: Bool
+  , freport_contributingLastChange :: Maybe Text
+  , freport_licenseLastChange :: Maybe Text
+  , freport_noticeLastChange :: Maybe Text
+  , freport_readmeLastChange :: Maybe Text
   } deriving (Show, Generic)
 instance ToJSON FileReport where
-    toEncoding = genericToEncoding defaultOptions
+  toEncoding = genericToEncoding defaultOptions
 
 data Report
   = Report
   { report_repo :: Repo
-  , report_commits :: [Commit]
-  , report_commitStats :: Map.Map Text CommitStats
+  , report_commit_report :: Maybe CommitReport
   , report_issues :: [Issue]
   , report_pulls :: [Pull]
   , report_file_report :: FileReport
   } deriving (Show, Generic)
 instance ToJSON Report where
-    toEncoding = genericToEncoding defaultOptions
+  toEncoding = genericToEncoding defaultOptions
 
 -- TODO: paging
 reposUrl :: String -> String
@@ -213,7 +239,7 @@ pullsUrl repo = "https://api.github.com/repos/" ++ Tx.unpack (full_name repo) ++
 getHTTP :: FromJSON b => (a -> String) -> W.Options -> a -> IO (Either String b)
 getHTTP urlGetter opts val = do
   let url = (urlGetter val)
-  putStrLn ("get from: " ++ url)
+  putStrLn ("## get from: " ++ url)
   response :: (W.Response b) <- W.asJSON =<< W.getWith opts url
   let rCode = response ^. W.responseStatus . W.statusCode
   return $ if rCode == 200
@@ -239,8 +265,8 @@ cloneIfNecessary Repo{full_name = f, clone_url = c} = do
     e <- T.proc "git" ["clone", c, f] (T.select [])
     print e
 
-handleCommitsOfRepo :: Repo -> IO (Either String [Commit])
-handleCommitsOfRepo repo = let
+handleRawCommitsOfRepo :: Repo -> IO (Either String [Commit])
+handleRawCommitsOfRepo repo = let
     -- TODO: ugly:
     input = TB.inproc "git" ["log", "--date=iso", "--pretty=format:\"%h\",\"%an\",\"%ae\",\"%ad\",\"%cn\",\"%ce\",\"%cd\",\"%s\""] (T.select [])
     inputWOMsg = TB.inproc "git" ["log", "--date=iso", "--pretty=format:\"%h\",\"%an\",\"%ae\",\"%ad\",\"%cn\",\"%ce\",\"%cd\",\"\""] (T.select [])
@@ -261,71 +287,107 @@ handleCommitsOfRepo repo = let
           Right results -> Right (V.toList (V.map handleGitLogLine results))
       Right results -> return $ Right (V.toList (V.map handleGitLogLine results))
 
-handleFilesOfRepo :: Repo -> IO FileReport
-handleFilesOfRepo repo = do
-  lines <- fold (T.inproc "git" ["ls-files"] (T.select [])) F.list
-  let files = (L.map lineToText lines)
-  let funToTestFiles = \s -> L.any (s `Tx.isPrefixOf`) files
-  let hasContributing = funToTestFiles "CONTRIBUTING"
-      hasLicense = funToTestFiles "LICENSE"
-      hasNotice = funToTestFiles "NOTICE"
-      hasReadme = funToTestFiles "README"
-  return (FileReport files hasContributing hasLicense hasNotice hasReadme)
+handleCommitsOfRepo :: Repo -> IO (Either String CommitReport)
+handleCommitsOfRepo repo = let
+    computeUserStats :: [Commit] -> Map.Map Text CommitStats
+    computeUserStats commits = let
+        stupidMapStats :: Commit -> [(Text, CommitStats)]
+        stupidMapStats commit = let
+            author = commit_author commit
+            commiter = commit_commiter commit
+          in [ (person_email commiter, CommitStats [person_name commiter] 1 0)
+             , (person_email author, CommitStats [person_name author] 0 1) ]
+        joinStats s1 s2 = CommitStats (L.nub $ cm_name s1 ++ cm_name s2) (cm_commits s1 + cm_commits s2) (cm_authors s1 + cm_authors s2)
+      in Map.fromListWith joinStats $ L.concatMap stupidMapStats commits
+  in do
+    result <- handleRawCommitsOfRepo repo
+    return $ case result of
+      Left err -> Left err
+      Right commits -> let
+          userStats = computeUserStats commits
+        in Right $ CommitReport commits userStats
 
-computeUserStats :: [Commit] -> Map.Map Text CommitStats
-computeUserStats commits = let
-    stupidMapStats :: Commit -> [(Text, CommitStats)]
-    stupidMapStats commit = let
-        author = commit_author commit
-        commiter = commit_commiter commit
-      in [ (person_email commiter, CommitStats [person_name commiter] 1 0)
-         , (person_email author, CommitStats [person_name author] 0 1) ]
-    joinStats s1 s2 = CommitStats (L.nub $ cm_name s1 ++ cm_name s2) (cm_commits s1 + cm_commits s2) (cm_authors s1 + cm_authors s2)
-  in Map.fromListWith joinStats $ L.concatMap stupidMapStats commits
+handleFilesOfRepo :: IO FileReport
+handleFilesOfRepo = let
+    funToTestFiles :: [Text] -> Text -> IO (Maybe Text)
+    funToTestFiles files s = let
+        getDateOfFile :: Text -> IO Text
+        getDateOfFile file = do
+          date <- fold (T.inproc "git" ["log", "-1", "--format=%ai;%H", "--", file] (T.select [])) F.mconcat
+          return (T.lineToText date)
+        getDateOfFiles :: [Text] -> IO (Maybe Text)
+        getDateOfFiles []      = return Nothing
+        getDateOfFiles matches = Just . L.maximum <$> mapM getDateOfFile matches
+      in do
+        let matchingFiles = L.filter (s `Tx.isPrefixOf`) files
+        getDateOfFiles matchingFiles
+  in do
+    putStrLn "# get files"
+    files <- L.map lineToText <$> fold (T.inproc "git" ["ls-files"] (T.select [])) F.list
+    putStrLn "# handle CORTIBUTING"
+    hasContributing <- funToTestFiles files "CONTRIBUTING"
+    putStrLn "# handle LICENSE"
+    hasLicense <- funToTestFiles files "LICENSE"
+    putStrLn "# handle NOTICE"
+    hasNotice <- funToTestFiles files "NOTICE"
+    putStrLn "# handle README"
+    hasReadme <- funToTestFiles files "README"
+    return (FileReport files hasContributing hasLicense hasNotice hasReadme)
 
 handleRepo :: W.Options -> Repo -> IO Report
 handleRepo opts repo = let
-    handleEitherResult :: Either String [a] -> IO [a]
-    handleEitherResult (Left err) = do
+    handleEitherListResult :: Either String [a] -> IO [a]
+    handleEitherListResult (Left err) = do
       print err
       return []
-    handleEitherResult (Right vals) = return vals
+    handleEitherListResult (Right vals) = return vals
+    handleEitherResult :: Either String a -> IO (Maybe a)
+    handleEitherResult (Left err) = do
+      print err
+      return Nothing
+    handleEitherResult (Right val) = return $ Just val
   in do
-    putStrLn ("### handle repo: " ++ (show (full_name repo)))
+    putStrLn ("### handle repo: " ++ show (full_name repo))
     cloneIfNecessary repo
     T.cd $ T.fromText (full_name repo)
 
-    commits <- handleEitherResult =<< handleCommitsOfRepo repo
+    putStrLn "## handle commits"
+    commitReport <- handleEitherResult =<< handleCommitsOfRepo repo
+    putStrLn "## handle issues"
+    issues <- handleEitherListResult =<< getIssuesHTTP opts repo
+    putStrLn "## handle pulls"
+    pulls <- handleEitherListResult =<< getPullsHTTP opts repo
+    putStrLn "## handle files"
+    fileReport <- handleFilesOfRepo
 
-    let userStats = computeUserStats commits
-
-    issues <- handleEitherResult =<< getIssuesHTTP opts repo
-    pulls <- handleEitherResult =<< getPullsHTTP opts repo
-
-    fileReport <- handleFilesOfRepo repo
-
-    return (Report repo commits userStats issues pulls fileReport)
+    return (Report repo commitReport issues pulls fileReport)
 
 handleReport :: Report -> IO ()
 handleReport report@(Report{report_repo = repo@Repo{full_name = fn, name = n}}) = do
   putStrLn ("### write reports of: " ++ (show (full_name repo)))
 
+  -- write raw report
   let pReport = A.encodePretty report
       reportPath = T.fromText $ fn `Tx.append` (Tx.pack ".json")
   TB.output reportPath (return (BSL.toStrict pReport))
 
-  let emailsCsvPath = T.fromText $ fn `Tx.append` (Tx.pack "_emails.csv")
-      emails = ( Tx.encodeUtf8
-               . Tx.unlines
-               . ("email,#authors,#commits,names...":)
-               . L.map (Tx.intercalate (singleton ','))
-               . L.map (\(k,v) -> (k
-                                   : ((Tx.pack . show $ cm_authors v)
-                                      : ((Tx.pack . show $ cm_commits v)
-                                         : (cm_name v)))))
-               . Map.assocs
-               . report_commitStats) report
-  TB.output emailsCsvPath (return emails)
+  -- write emails csv
+
+  case ((fmap cmr_commitStats) . report_commit_report) report of
+    Just commitStats -> do
+      let emailsCsvPath = T.fromText $ fn `Tx.append` (Tx.pack "_emails.csv")
+          emails = ( Tx.encodeUtf8
+                   . Tx.unlines
+                   . ("email,#authors,#commits,names...":)
+                   . L.map (Tx.intercalate (singleton ','))
+                   . L.map (\(k,v) -> (k
+                                        : ((Tx.pack . show $ cm_authors v)
+                                            : ((Tx.pack . show $ cm_commits v)
+                                                : (cm_name v)))))
+                   . Map.assocs
+                   ) commitStats
+      TB.output emailsCsvPath (return emails)
+    Nothing -> return ()
 
 main :: IO ()
 main = let
@@ -346,5 +408,6 @@ main = let
     parsed <- getReposHTTP opts org
     case parsed of
       Left err    -> print err
-      Right repos -> do
-        mapM_ (\repo -> T.cd root >> handleRepo opts repo >>= (\report -> T.cd root >> handleReport report)) repos
+      Right repos -> mapM_ (\repo -> T.cd root >> handleRepo opts repo >>= (\report -> T.cd root >> handleReport report)) repos
+
+    putStrLn ("workdir was: " ++ (Tx.unpack $ T.format T.fp root))
