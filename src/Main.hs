@@ -18,6 +18,7 @@ import qualified Data.Csv as CSV
 import           Data.Text as Tx
 import qualified Data.Text.Encoding as Tx
 import           Data.List as L
+import           Data.Maybe
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as BSL
 import qualified Data.Map as Map
@@ -282,6 +283,9 @@ handleRawCommitsOfRepo repo = let
           Right results -> Right (V.toList (V.map handleGitLogLine results))
       Right results -> return $ Right (V.toList (V.map handleGitLogLine results))
 
+joinStats :: CommitStats -> CommitStats -> CommitStats
+joinStats s1 s2 = CommitStats (L.nub $ cm_name s1 ++ cm_name s2) (cm_commits s1 + cm_commits s2) (cm_authors s1 + cm_authors s2)
+
 handleCommitsOfRepo :: Repo -> IO (Either String CommitReport)
 handleCommitsOfRepo repo = let
     computeUserStats :: [Commit] -> Map.Map Text CommitStats
@@ -292,7 +296,6 @@ handleCommitsOfRepo repo = let
             commiter = commit_commiter commit
           in [ (person_email commiter, CommitStats [person_name commiter] 1 0)
              , (person_email author, CommitStats [person_name author] 0 1) ]
-        joinStats s1 s2 = CommitStats (L.nub $ cm_name s1 ++ cm_name s2) (cm_commits s1 + cm_commits s2) (cm_authors s1 + cm_authors s2)
       in Map.fromListWith joinStats $ L.concatMap stupidMapStats commits
   in do
     result <- handleRawCommitsOfRepo repo
@@ -347,7 +350,7 @@ handleRepo opts repo = let
     putStrLn "## handle files"
     Report repo commitReport issues pulls <$> handleFilesOfRepo repo
 
-handleReport :: Report -> IO ()
+handleReport :: Report -> IO Report
 handleReport report@(Report{report_repo = repo@Repo{full_name = fn}}) = do
   putStrLn ("## write reports of: " ++ show (full_name repo))
 
@@ -372,6 +375,23 @@ handleReport report@(Report{report_repo = repo@Repo{full_name = fn}}) = do
                    ) commitStats
       TB.output emailsCsvPath (return emails)
     Nothing -> return ()
+  return report
+
+handleAllReports :: String -> [Report] -> IO ()
+handleAllReports org reports = do
+  let emailsCsvPath = T.fromString $ org ++ "/" ++ org ++ "_all_emails.csv"
+      emails = ( Tx.encodeUtf8
+               . Tx.unlines
+               . ("email,names...":)
+               . L.map ( Tx.intercalate (singleton ',')
+                       . (\(k,v) -> (k : cm_name v)))
+               . Map.assocs
+               . Map.fromListWith joinStats
+               . L.concatMap Map.assocs
+               . mapMaybe ( fmap cmr_commitStats
+                          . report_commit_report)
+               ) reports
+  TB.output emailsCsvPath (return emails)
 
 main :: IO ()
 main = let
@@ -391,7 +411,8 @@ main = let
     case parsed of
       Left err    -> print err
       Right repos -> do
-        mapM_ (handleRepo opts >=> handleReport) repos
+        reports <- mapM (handleRepo opts >=> handleReport) repos
+        handleAllReports org reports
 
         putStrLn "### write .gitignore"
         T.output (T.fromString org </> ".gitignore") ((return . unsafeTextToLine  . Tx.unlines . L.map name) repos)
