@@ -26,8 +26,6 @@ This folder then can be handled via git to see the changes since the last scan.
   ```
   where you have to fill in `[[org]]`.
   
-after every scan one should add the files `/$org/*.{json,csv}` and do a commit.
-  
 One can later update `repoScan` via:
 ```
 $ git subtree pull --prefix repoScan repoScan master

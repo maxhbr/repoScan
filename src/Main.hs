@@ -59,6 +59,7 @@ data Repo
   , stargazers_count :: Int
   , watchers_count :: Int
   , forks_count :: Int
+  , description :: Maybe Text
   } deriving (Show, Generic)
 instance FromJSON Repo where
   parseJSON = withObject "Repo" $
@@ -78,6 +79,7 @@ instance FromJSON Repo where
                <*> v .: "stargazers_count"
                <*> v .: "watchers_count"
                <*> v .: "forks_count"
+               <*> v .:? "description"
 instance ToJSON Repo where
   toEncoding = genericToEncoding defaultOptions
 
@@ -375,6 +377,7 @@ handleReport report@Report{report_repo = repo@Repo{full_name = fn}} = do
 
 handleAllReports :: String -> [Report] -> IO ()
 handleAllReports org reports = do
+  putStrLn "### handle all repos at once"
   let emailsCsvPath = T.fromString $ org ++ "/" ++ org ++ "_all_emails.csv"
       emails = ( Tx.encodeUtf8
                . Tx.unlines
