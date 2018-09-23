@@ -306,23 +306,25 @@ handleCommitsOfRepo repo = let
 
 handleFilesOfRepo :: Repo -> IO FileReport
 handleFilesOfRepo Repo{full_name = f} = let
-    funToTestFiles :: [Text] -> Text -> IO (Maybe Text)
-    funToTestFiles files pfx = let
-        getDateOfFile :: Text -> IO Text
-        getDateOfFile file = T.lineToText <$> fold (T.inproc "git" ["--git-dir", f `Tx.append` "/.git", "log", "-1", "--format=%ai;%H", "--", file] (T.select [])) F.mconcat
-        getDateOfFiles :: [Text] -> IO (Maybe Text)
-        getDateOfFiles []      = return Nothing
-        getDateOfFiles matches = Just . L.maximum <$> mapM getDateOfFile matches
+    getDateOfFile :: Text -> IO Text
+    getDateOfFile file = T.lineToText <$> fold (T.inproc "git" ["--git-dir", f `Tx.append` "/.git", "log", "-1", "--format=%ai;%H", "--", file] (T.select [])) F.mconcat
+    getDateOfFiles :: [Text] -> IO (Maybe Text)
+    getDateOfFiles []      = return Nothing
+    getDateOfFiles matches = Just . L.maximum <$> mapM getDateOfFile matches
+    getDateOfMatchingFiles :: [Text] -> Text -> IO (Maybe Text)
+    getDateOfMatchingFiles files pfx = let
       in do
         let matchingFiles = L.filter (pfx `Tx.isPrefixOf`) files
         getDateOfFiles matchingFiles
   in do
     files <- L.map lineToText <$> fold (T.inproc "git" ["--git-dir", f `Tx.append` "/.git", "ls-files"] (T.select [])) F.list
-    lastChangeOfContributing <- funToTestFiles files "CONTRIBUTING"
-    lastChangeOfLicense <- funToTestFiles files "LICENSE"
-    lastChangeOfNotice <- funToTestFiles files "NOTICE"
-    lastChangeOfReadme <- funToTestFiles files "README"
-    lastChangeOfDco <- funToTestFiles files "DCO"
+
+    lastChangeOfContributing <- getDateOfMatchingFiles files "CONTRIBUTING"
+    lastChangeOfLicense      <- getDateOfMatchingFiles files "LICENSE"
+    lastChangeOfNotice       <- getDateOfMatchingFiles files "NOTICE"
+    lastChangeOfReadme       <- getDateOfMatchingFiles files "README"
+    lastChangeOfDco          <- getDateOfMatchingFiles files "DCO"
+
     return (FileReport files lastChangeOfContributing lastChangeOfLicense lastChangeOfNotice lastChangeOfReadme lastChangeOfDco)
 
 handleRepo :: W.Options -> Repo -> IO Report
@@ -409,7 +411,6 @@ main = let
 
     parsed <- getReposHTTP opts org
     case parsed of
-      Left err    -> print err
       Right repos -> do
         putStrLn "\n\n"
         reports <- mapM (handleRepo opts >=> handleReport) repos
@@ -417,3 +418,4 @@ main = let
 
         putStrLn "### write .gitignore"
         T.output (T.fromString org </> ".gitignore") ((return . unsafeTextToLine  . Tx.unlines . L.map name) repos)
+      Left err    -> print err
