@@ -34,11 +34,10 @@ data License
   } deriving (Show, Generic)
 instance FromJSON License where
   parseJSON = withObject "License" $
-    \v -> License
-            <$> v .: "key"
-            <*> v .: "name"
-            <*> v .:? "spdx_id"
-            <*> v .:? "url"
+    \v -> License <$> v .: "key"
+                  <*> v .: "name"
+                  <*> v .:? "spdx_id"
+                  <*> v .:? "url"
 instance ToJSON License where
   toEncoding = genericToEncoding defaultOptions
 
@@ -63,23 +62,22 @@ data Repo
   } deriving (Show, Generic)
 instance FromJSON Repo where
   parseJSON = withObject "Repo" $
-    \v -> Repo
-            <$> v .: "name"
-            <*> v .: "full_name"
-            <*> v .:? "license"
-            <*> v .: "fork"
-            <*> v .: "archived"
-            <*> v .: "created_at"
-            <*> v .: "updated_at"
-            <*> v .: "pushed_at"
-            <*> v .: "clone_url"
-            <*> v .: "git_url"
-            <*> v .: "ssh_url"
-            <*> v .: "size"
-            <*> v .: "open_issues_count"
-            <*> v .: "stargazers_count"
-            <*> v .: "watchers_count"
-            <*> v .: "forks_count"
+    \v -> Repo <$> v .: "name"
+               <*> v .: "full_name"
+               <*> v .:? "license"
+               <*> v .: "fork"
+               <*> v .: "archived"
+               <*> v .: "created_at"
+               <*> v .: "updated_at"
+               <*> v .: "pushed_at"
+               <*> v .: "clone_url"
+               <*> v .: "git_url"
+               <*> v .: "ssh_url"
+               <*> v .: "size"
+               <*> v .: "open_issues_count"
+               <*> v .: "stargazers_count"
+               <*> v .: "watchers_count"
+               <*> v .: "forks_count"
 instance ToJSON Repo where
   toEncoding = genericToEncoding defaultOptions
 
@@ -95,14 +93,13 @@ data Issue
   } deriving (Show, Generic)
 instance FromJSON Issue where
   parseJSON = withObject "Issue" $
-    \v -> Issue
-            <$> v .: "title"
-            <*> v .: "number"
-            <*> v .: "state"
-            <*> v .: "comments"
-            <*> v .: "created_at"
-            <*> v .: "updated_at"
-            <*> v .:? "closed_at"
+    \v -> Issue <$> v .: "title"
+                <*> v .: "number"
+                <*> v .: "state"
+                <*> v .: "comments"
+                <*> v .: "created_at"
+                <*> v .: "updated_at"
+                <*> v .:? "closed_at"
 instance ToJSON Issue where
   toEncoding = genericToEncoding defaultOptions
 
@@ -118,14 +115,13 @@ data Pull
   } deriving (Show, Generic)
 instance FromJSON Pull where
   parseJSON = withObject "Pull" $
-    \v -> Pull
-            <$> v .: "title"
-            <*> v .: "number"
-            <*> v .: "state"
-            <*> v .: "created_at"
-            <*> v .: "updated_at"
-            <*> v .:? "closed_at"
-            <*> v .:? "merged_at"
+    \v -> Pull <$> v .: "title"
+               <*> v .: "number"
+               <*> v .: "state"
+               <*> v .: "created_at"
+               <*> v .: "updated_at"
+               <*> v .:? "closed_at"
+               <*> v .:? "merged_at"
 instance ToJSON Pull where
   toEncoding = genericToEncoding defaultOptions
 
@@ -212,8 +208,8 @@ data Report
   = Report
   { report_repo :: Repo
   , report_commit_report :: Maybe CommitReport
-  , report_issues :: [Issue]
-  , report_pulls :: [Pull]
+  , report_issues :: Maybe [Issue]
+  , report_pulls :: Maybe [Pull]
   , report_file_report :: FileReport
   } deriving (Show, Generic)
 instance ToJSON Report where
@@ -228,7 +224,7 @@ pullsUrl repo = "https://api.github.com/repos/" ++ Tx.unpack (full_name repo) ++
 
 getHTTP :: FromJSON b => (a -> String) -> W.Options -> a -> IO (Either String b)
 getHTTP urlGetter opts val = do
-  let url = (urlGetter val)
+  let url = urlGetter val
   putStrLn ("## get from: " ++ url)
   response :: (W.Response b) <- W.asJSON =<< W.getWith opts url
   let rCode = response ^. W.responseStatus . W.statusCode
@@ -308,14 +304,14 @@ handleCommitsOfRepo repo = let
 handleFilesOfRepo :: Repo -> IO FileReport
 handleFilesOfRepo Repo{full_name = f} = let
     funToTestFiles :: [Text] -> Text -> IO (Maybe Text)
-    funToTestFiles files prefix = let
+    funToTestFiles files pfx = let
         getDateOfFile :: Text -> IO Text
         getDateOfFile file = T.lineToText <$> fold (T.inproc "git" ["--git-dir", f `Tx.append` "/.git", "log", "-1", "--format=%ai;%H", "--", file] (T.select [])) F.mconcat
         getDateOfFiles :: [Text] -> IO (Maybe Text)
         getDateOfFiles []      = return Nothing
         getDateOfFiles matches = Just . L.maximum <$> mapM getDateOfFile matches
       in do
-        let matchingFiles = L.filter (prefix `Tx.isPrefixOf`) files
+        let matchingFiles = L.filter (pfx `Tx.isPrefixOf`) files
         getDateOfFiles matchingFiles
   in do
     files <- L.map lineToText <$> fold (T.inproc "git" ["--git-dir", f `Tx.append` "/.git", "ls-files"] (T.select [])) F.list
@@ -327,31 +323,28 @@ handleFilesOfRepo Repo{full_name = f} = let
 
 handleRepo :: W.Options -> Repo -> IO Report
 handleRepo opts repo = let
-    handleEitherListResult :: Either String [a] -> IO [a]
-    handleEitherListResult (Left err) = do
-      print err
-      return []
-    handleEitherListResult (Right vals) = return vals
+
     handleEitherResult :: Either String a -> IO (Maybe a)
     handleEitherResult (Left err) = do
       print err
       return Nothing
     handleEitherResult (Right val) = return $ Just val
+
   in do
     putStrLn ("### handle repo: " ++ show (full_name repo))
-    putStrLn ("## handle git")
+    putStrLn "## handle git"
     cloneOrUpdate repo
     putStrLn "## handle commits"
     commitReport <- handleEitherResult =<< handleCommitsOfRepo repo
     putStrLn "## handle issues"
-    issues <- handleEitherListResult =<< getIssuesHTTP opts repo
+    issues <- handleEitherResult =<< getIssuesHTTP opts repo
     putStrLn "## handle pulls"
-    pulls <- handleEitherListResult =<< getPullsHTTP opts repo
+    pulls <- handleEitherResult =<< getPullsHTTP opts repo
     putStrLn "## handle files"
     Report repo commitReport issues pulls <$> handleFilesOfRepo repo
 
 handleReport :: Report -> IO Report
-handleReport report@(Report{report_repo = repo@Repo{full_name = fn}}) = do
+handleReport report@Report{report_repo = repo@Repo{full_name = fn}} = do
   putStrLn ("## write reports of: " ++ show (full_name repo))
 
   putStrLn "# write raw report"
@@ -367,14 +360,15 @@ handleReport report@(Report{report_repo = repo@Repo{full_name = fn}}) = do
                    . Tx.unlines
                    . ("email,#authors,#commits,names...":)
                    . L.map ( Tx.intercalate (singleton ',')
-                           . (\(k,v) -> (k
-                                          : ((Tx.pack . show $ cm_authors v)
-                                              : ((Tx.pack . show $ cm_commits v)
-                                                  : cm_name v)))))
+                           . (\(k,v) -> ([ k
+                                         , Tx.pack . show $ cm_authors v
+                                         , Tx.pack . show $ cm_commits v ]
+                                         ++ cm_name v)))
                    . Map.assocs
                    ) commitStats
       TB.output emailsCsvPath (return emails)
     Nothing -> return ()
+  putStrLn "\n\n"
   return report
 
 handleAllReports :: String -> [Report] -> IO ()
@@ -392,6 +386,7 @@ handleAllReports org reports = do
                           . report_commit_report)
                ) reports
   TB.output emailsCsvPath (return emails)
+  putStrLn "\n\n"
 
 main :: IO ()
 main = let
@@ -411,6 +406,7 @@ main = let
     case parsed of
       Left err    -> print err
       Right repos -> do
+        putStrLn "\n\n"
         reports <- mapM (handleRepo opts >=> handleReport) repos
         handleAllReports org reports
 
