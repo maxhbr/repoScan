@@ -200,6 +200,7 @@ data FileReport
   , freport_licenseLastChange :: Maybe Text
   , freport_noticeLastChange :: Maybe Text
   , freport_readmeLastChange :: Maybe Text
+  , freport_dcoLastChange :: Maybe Text
   } deriving (Show, Generic)
 instance ToJSON FileReport where
   toEncoding = genericToEncoding defaultOptions
@@ -315,11 +316,12 @@ handleFilesOfRepo Repo{full_name = f} = let
         getDateOfFiles matchingFiles
   in do
     files <- L.map lineToText <$> fold (T.inproc "git" ["--git-dir", f `Tx.append` "/.git", "ls-files"] (T.select [])) F.list
-    hasContributing <- funToTestFiles files "CONTRIBUTING"
-    hasLicense <- funToTestFiles files "LICENSE"
-    hasNotice <- funToTestFiles files "NOTICE"
-    hasReadme <- funToTestFiles files "README"
-    return (FileReport files hasContributing hasLicense hasNotice hasReadme)
+    lastChangeOfContributing <- funToTestFiles files "CONTRIBUTING"
+    lastChangeOfLicense <- funToTestFiles files "LICENSE"
+    lastChangeOfNotice <- funToTestFiles files "NOTICE"
+    lastChangeOfReadme <- funToTestFiles files "README"
+    lastChangeOfDco <- funToTestFiles files "DCO"
+    return (FileReport files lastChangeOfContributing lastChangeOfLicense lastChangeOfNotice lastChangeOfReadme lastChangeOfDco)
 
 handleRepo :: W.Options -> Repo -> IO Report
 handleRepo opts repo = let
