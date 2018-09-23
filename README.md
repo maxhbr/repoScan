@@ -21,8 +21,9 @@ This folder then can be handled via git to see the changes since the last scan.
   stack build
   stack exec repoScan "$ghuser" "$ghtoken" "$org" ../
 
-  git add -- "../$org/*.{json,csv}"
-  git commit -m "Automatic sync @ $(date --iso-8601)" -- "../$org/*.{json,csv}"
+  cd $(dirname $0)
+  git add -- $org/*.{json,csv}
+  git commit -m "Automatic sync @ $(date --iso-8601)" -- $org/*.{json,csv}
   ```
   where you have to fill in `[[org]]`.
   
